@@ -1,0 +1,11 @@
+# Configuración del Editor Panka
+
+# Number of spaces for a tab.
+tabSize = 4
+
+# Whether to show line numbers on startup.
+# Toggled in-app with Ctrl+L
+showLineNumbers = true
+
+# Set to true to enable debug logging.
+enableLogger = false
