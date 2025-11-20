@@ -36,7 +36,7 @@ build:
 	@echo "Building Panka..."
 	@echo "  Version: $(VERSION)"
 	@echo "  Commit:  $(COMMIT)"
-	@go build -ldflags "-X github.com/bulga138/panka/version.Version=$(VERSION) -X github.com/bulga138/panka/version.Commit=$(COMMIT) -X github.com/bulga138/panka/version.BuildTime=\"$(BUILD_TIME)\"" -o $(BINARY_NAME)$(EXE_EXT) $(MAIN_PKG)
+	@go build -ldflags "-X github.com/bulga138/panka/version.Version=$(VERSION) -X github.com/bulga138/panka/version.Commit=$(COMMIT) -X 'github.com/bulga138/panka/version.BuildTime=$(BUILD_TIME)'" -o $(BINARY_NAME)$(EXE_EXT) $(MAIN_PKG)
 	@echo "Build complete: $(BINARY_NAME)$(EXE_EXT)"
 
 # Build with debug info (development)
@@ -50,7 +50,7 @@ build-dev:
 .PHONY: release
 release:
 	@echo "Building release version..."
-	@go build -ldflags "-X github.com/bulga138/panka/version.Version=$(TAG) -X github.com/bulga138/panka/version.Commit=$(shell git rev-parse --short HEAD) -X github.com/bulga138/panka/version.BuildTime=\"$(shell $(GET_DATE))\"" -o $(BINARY_NAME)-$(TAG)$(EXE_EXT) $(MAIN_PKG)
+	@go build -ldflags "-X github.com/bulga138/panka/version.Version=$(TAG) -X github.com/bulga138/panka/version.Commit=$(shell git rev-parse --short HEAD) -X 'github.com/bulga138/panka/version.BuildTime=$(shell $(GET_DATE))'" -o $(BINARY_NAME)-$(TAG)$(EXE_EXT) $(MAIN_PKG)
 	@echo "Release build complete"
 
 # Run the editor
@@ -61,7 +61,7 @@ run:
 # Run with version info
 .PHONY: run-version
 run-version:
-	@go run -ldflags "-X github.com/bulga138/panka/version.Version=$(VERSION) -X github.com/bulga138/panka/version.Commit=$(COMMIT) -X github.com/bulga138/panka/version.BuildTime=\"$(BUILD_TIME)\"" $(MAIN_PKG) --version
+	@go run -ldflags "-X github.com/bulga138/panka/version.Version=$(VERSION) -X github.com/bulga138/panka/version.Commit=$(COMMIT) -X 'github.com/bulga138/panka/version.BuildTime=$(BUILD_TIME)'" $(MAIN_PKG) --version
 
 # Run with file
 .PHONY: run-file
