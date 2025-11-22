@@ -34,11 +34,11 @@ if (-not (Test-Path -Path $installDir)) {
 }
 
 # Download the latest panka.exe
-$url = "[https://github.com/bulga138/panka/releases/latest/download/panka.exe](https://github.com/bulga138/panka/releases/latest/download/panka.exe)"
+$url = "https://github.com/bulga138/panka/releases/latest/download/panka.exe"
 $output = "$installDir\panka.exe"
 
 # Use wget (alias for Invoke-WebRequest) to download the file
-wget -Uri $url -OutFile $output
+Invoke-WebRequest -Uri $url -OutFile $output
 ```
 
 ### 2. Add to PATH
@@ -119,11 +119,11 @@ enableLogger = false
 |Action|Key
 |---|----|
 |**Save File**|`Ctrl` + `S`||
-|**Save As**|`Ctrl` + `E`
-|**Quit**|`Ctrl` + `Q`
-|**Undo**|`Ctrl` + `U`
-|**Redo**|`Ctrl` + `Y`
-|**Toggle Line Numbers**|`Ctrl` + L
+|**Save As**|`Ctrl` + `E`||
+|**Quit**|`Ctrl` + `Q`||
+|**Undo**|`Ctrl` + `U`||
+|**Redo**|`Ctrl` + `Y`||
+|**Toggle Line Numbers**|`Ctrl` + `L`||
 |**Toggle Non-Printables**|`Ctrl` + `O`||
 
 
