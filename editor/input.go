@@ -137,7 +137,7 @@ func (e *Editor) handleFindInput(r rune) error {
 }
 
 func (e *Editor) handleReplaceConfirm(r rune) error {
-	e.isConfirmingReplace = false // Consume the input
+	e.isConfirmingReplace = false
 	switch r {
 	case 'y', 'Y':
 		e.replaceAll()
@@ -284,7 +284,6 @@ func (e *Editor) handleSaveAsInput(r rune) error {
 			e.promptCursorX = 0
 			return nil
 		}
-
 		e.filename = filename
 		e.promptBuffer = ""
 		e.promptCursorX = 0
@@ -421,6 +420,17 @@ func (e *Editor) handleDeleteWordRight() {
 	e.endUndoGroup()
 }
 
+// Helper to get range of lines for multi-cursor
+func (e *Editor) getMultiCursorRange() (int, int) {
+	if e.extraCursorHeight == 0 {
+		return e.cursorY, e.cursorY
+	}
+	if e.extraCursorHeight > 0 {
+		return e.cursorY, e.cursorY + e.extraCursorHeight
+	}
+	return e.cursorY + e.extraCursorHeight, e.cursorY
+}
+
 func (e *Editor) handleKey(r rune) error {
 	// Common: if key is not selection-related, we stop selection mode
 	switch r {
@@ -428,6 +438,7 @@ func (e *Editor) handleKey(r rune) error {
 	case '\x03': // Ctrl+C (Copy)
 	case '\x18': // Ctrl+X (Cut)
 	case '\x01': // Ctrl+A (Select All)
+	case '\x7f': // Backspace
 		// Do nothing
 	default:
 		e.selectionActive = false
@@ -443,10 +454,15 @@ func (e *Editor) handleKey(r rune) error {
 	switch r {
 	case '\x01': // Ctrl+A - Select All
 		e.flushEditGroups()
+		e.extraCursorHeight = 0
 		return e.selectAll()
 	case '\x11': // Ctrl+Q
 		e.flushEditGroups()
 		if !e.dirty {
+			e.quit = true
+			return nil
+		}
+		if e.isContentUnchanged() {
 			e.quit = true
 			return nil
 		}
@@ -515,30 +531,74 @@ func (e *Editor) handleKey(r rune) error {
 			e.findInitial()
 		}
 		return nil
+	case '\x0f': // Ctrl+O (Toggle Non-Printable)
+		e.flushEditGroups()
+		e.showNonPrintable = !e.showNonPrintable
+		status := "Show non-printable: OFF"
+		if e.showNonPrintable {
+			status = "Show non-printable: ON"
+		}
+		e.setStatusMessage(status)
+	case '\x04': // Ctrl+D
+		e.flushEditGroups()
+		e.extraCursorHeight = 0
+		e.duplicateLine()
+
+	case '\x0b': // Ctrl+K
+		e.flushEditGroups()
+		e.extraCursorHeight = 0
+		e.toggleCaseAtCursor()
+
 	case '\x17': // Ctrl+W
 		e.handleDeleteWordLeft()
 	case '\r': // Enter
 		e.flushBackspaceGroup()
 		e.flushDeleteGroup()
+		e.flushTypingGroup()
+		e.extraCursorHeight = 0
+
 		now := time.Now()
-		if !e.typingActive || now.Sub(e.lastTypeTime) > e.typeGroupThreshold {
-			e.flushTypingGroup()
-			e.typingActive = true
-			e.typingEntries = make([]opEntry, 0, 8)
+
+		currentLine := e.buffer.GetLine(e.cursorY)
+		indent := ""
+		for _, char := range currentLine {
+			if char == ' ' || char == '\t' {
+				indent += string(char)
+			} else {
+				break
+			}
 		}
-		insertLine := e.cursorY
-		insertCol := e.cursorX
-		e.buffer.Insert(e.cursorY, e.cursorX, '\n')
-		e.cursorY++
-		e.cursorX = 0
-		delLine := e.cursorY
-		delCol := e.cursorX
-		e.typingEntries = append(e.typingEntries, opEntry{
-			insertLine: insertLine, insertCol: insertCol,
-			delLine: delLine, delCol: delCol,
-			r: '\n',
-		})
-		e.typingActive = true
+
+		textToInsert := "\n" + indent
+
+		entries := make([]opEntry, 0, len(textToInsert))
+
+		for _, char := range textToInsert {
+			insertLine := e.cursorY
+			insertCol := e.cursorX
+
+			if err := e.buffer.Insert(e.cursorY, e.cursorX, char); err != nil {
+				e.setStatusMessage("Insert error: %v", err)
+				return nil
+			}
+
+			if char == '\n' {
+				e.cursorY++
+				e.cursorX = 0
+			} else {
+				e.cursorX++
+			}
+
+			entries = append(entries, opEntry{
+				insertLine: insertLine,
+				insertCol:  insertCol,
+				delLine:    e.cursorY,
+				delCol:     e.cursorX,
+				r:          char,
+			})
+		}
+
+		e.pushUndoInsertBlock(entries)
 		e.lastTypeTime = now
 		e.dirty = true
 
@@ -551,66 +611,104 @@ func (e *Editor) handleKey(r rune) error {
 		}
 		e.flushTypingGroup()
 		e.flushDeleteGroup()
-		now := time.Now()
-		if !e.backspaceActive || now.Sub(e.lastBackspaceTime) > e.backspaceThreshold {
-			e.flushBackspaceGroup()
-			e.backspaceActive = true
-			e.backspaceEntries = make([]opEntry, 0, 8)
-		}
-		if e.cursorX == 0 && e.cursorY == 0 {
-			// nothing
-		} else {
-			if e.cursorX > 0 {
-				delIndex := e.cursorX - 1
-				char := e.getRuneAt(e.cursorY, delIndex)
-				e.backspaceEntries = append(e.backspaceEntries, opEntry{
-					insertLine: e.cursorY,
-					insertCol:  delIndex,
-					r:          char,
-				})
-				e.buffer.Delete(e.cursorY, e.cursorX)
-				e.cursorX = delIndex
-				e.dirty = true
+
+		// --- Multi-Cursor Backspace ---
+		e.beginUndoGroup()
+		defer e.endUndoGroup()
+
+		startLine, endLine := e.getMultiCursorRange()
+
+		// Process from bottom to top
+		for i := endLine; i >= startLine; i-- {
+			if i >= e.buffer.LineCount() {
+				continue
+			}
+
+			lineRunes := []rune(e.buffer.GetLine(i))
+			lineLen := len(lineRunes)
+
+			targetX := e.cursorX
+			if targetX > lineLen {
+				targetX = lineLen
+			}
+
+			if targetX == 0 && i == 0 {
+				continue
 			} else {
-				prevLineIdx := e.cursorY - 1
-				prevLineContent := e.buffer.GetLine(prevLineIdx)
-				expectedCursorX := len([]rune(prevLineContent))
-				e.backspaceEntries = append(e.backspaceEntries, opEntry{
-					insertLine: prevLineIdx,
-					insertCol:  expectedCursorX,
-					r:          '\n',
-				})
-				e.cursorY = prevLineIdx
-				e.buffer.Delete(e.cursorY+1, 0)
-				mergedLineContent := e.buffer.GetLine(e.cursorY)
-				e.cursorX = len([]rune(mergedLineContent))
+				if targetX > 0 {
+					delIndex := targetX - 1
+					char := e.getRuneAt(i, delIndex)
+					e.pushUndoDeleteIfExternalGrouping(i, delIndex, char)
+					e.buffer.Delete(i, targetX)
+				} else {
+					// Handle join lines only if single cursor, or explicit decision.
+					// For column block, joining lines shifts everything below up, breaking the block structure.
+					// Let's DISABLE line joining in multi-cursor mode unless height is 0.
+					if e.extraCursorHeight == 0 {
+						prevLineIdx := i - 1
+						prevLineContent := e.buffer.GetLine(prevLineIdx)
+						expectedCursorX := len([]rune(prevLineContent))
+						e.pushUndoDeleteIfExternalGrouping(prevLineIdx, expectedCursorX, '\n')
+						e.cursorY = prevLineIdx
+						e.buffer.Delete(i, 0) // Delete newline of prev line? No, buffer delete logic is (y+1, 0)
+						// Actually logic is Delete(cursorY, cursorX).
+						// If cursorX==0, we delete the previous newline.
+						// Buffer.Delete(i, 0) -> deletes char BEFORE (i,0).
+						// Which is the newline at end of i-1.
+
+						// We only update main cursor if it's the primary line
+						if i == e.cursorY {
+							mergedLineContent := e.buffer.GetLine(e.cursorY)
+							e.cursorX = len([]rune(mergedLineContent))
+						}
+					}
+				}
 				e.dirty = true
 			}
 		}
-		e.lastBackspaceTime = now
+		// For normal typing backspace, we update cursorX *after* the loop if we didn't change lines
+		if e.cursorX > 0 {
+			e.cursorX--
+		}
 
 	default: // Typing
 		e.flushBackspaceGroup()
 		e.flushDeleteGroup()
-		now := time.Now()
-		if !e.typingActive || now.Sub(e.lastTypeTime) > e.typeGroupThreshold {
-			e.flushTypingGroup()
-			e.typingActive = true
-			e.typingEntries = make([]opEntry, 0, 8)
+		e.flushTypingGroup()
+
+		// --- Multi-Cursor Typing ---
+		e.beginUndoGroup()
+		defer e.endUndoGroup()
+
+		startLine, endLine := e.getMultiCursorRange()
+
+		for i := startLine; i <= endLine; i++ {
+			if i >= e.buffer.LineCount() {
+				continue
+			}
+
+			lineRunes := []rune(e.buffer.GetLine(i))
+			targetX := e.cursorX
+			if targetX > len(lineRunes) {
+				targetX = len(lineRunes)
+			}
+
+			if err := e.buffer.Insert(i, targetX, r); err != nil {
+				continue
+			}
+
+			// Push undo op
+			// Note: Undo logic uses 'delLine/Col' to know where to delete.
+			// insertLine/Col is mostly for redo.
+			e.pushUndoInsertBlock([]opEntry{{
+				insertLine: i, insertCol: targetX,
+				delLine: i, delCol: targetX,
+				r: r,
+			}})
 		}
-		insertLine := e.cursorY
-		insertCol := e.cursorX
-		e.buffer.Insert(e.cursorY, e.cursorX, r)
+
 		e.cursorX++
-		delLine := e.cursorY
-		delCol := e.cursorX
-		e.typingEntries = append(e.typingEntries, opEntry{
-			insertLine: insertLine, insertCol: insertCol,
-			delLine: delLine, delCol: delCol,
-			r: r,
-		})
-		e.typingActive = true
-		e.lastTypeTime = now
+		e.lastTypeTime = time.Now()
 		e.dirty = true
 	}
 	return nil

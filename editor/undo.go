@@ -41,7 +41,10 @@ func (e *Editor) performUndo(action undoAction) {
 		for i := len(action.ops) - 1; i >= 0; i-- {
 			op := action.ops[i]
 			// Delete(op.delLine, op.delCol) removes the rune inserted earlier.
-			e.buffer.Delete(op.delLine, op.delCol)
+			if err := e.buffer.Delete(op.delLine, op.delCol); err != nil {
+				e.setStatusMessage("Undo error: %v", err)
+				return
+			}
 		}
 		// Set cursor where the insertion started (convention: after undo, caret at insertion start)
 		if len(action.ops) > 0 {
@@ -51,7 +54,10 @@ func (e *Editor) performUndo(action undoAction) {
 	} else {
 		// Re-insert deleted runes in forward order at their original insert positions
 		for _, op := range action.ops {
-			e.buffer.Insert(op.insertLine, op.insertCol, op.r)
+			if err := e.buffer.Insert(op.insertLine, op.insertCol, op.r); err != nil {
+				e.setStatusMessage("Undo error: %v", err)
+				return
+			}
 		}
 		// Position the cursor based on the type of deletion
 		if len(action.ops) > 0 {
@@ -82,7 +88,10 @@ func (e *Editor) performRedo(action undoAction) {
 	if action.isInsert {
 		// Re-insert the runes in forward order at the recorded insert positions
 		for _, op := range action.ops {
-			e.buffer.Insert(op.insertLine, op.insertCol, op.r)
+			if err := e.buffer.Insert(op.insertLine, op.insertCol, op.r); err != nil {
+				e.setStatusMessage("Redo error: %v", err)
+				return
+			}
 		}
 		// Put cursor at end of inserted block (like Notepad/Word)
 		if len(action.ops) > 0 {
@@ -100,7 +109,10 @@ func (e *Editor) performRedo(action undoAction) {
 		for i := len(action.ops) - 1; i >= 0; i-- {
 			op := action.ops[i]
 			// Delete at position (insertLine, insertCol+1) deletes the rune originally at insertCol
-			e.buffer.Delete(op.insertLine, op.insertCol+1)
+			if err := e.buffer.Delete(op.insertLine, op.insertCol+1); err != nil {
+				e.setStatusMessage("Redo error: %v", err)
+				return
+			}
 		}
 		// Place cursor at the location of first deletion (insertLine, insertCol)
 		if len(action.ops) > 0 {

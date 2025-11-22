@@ -1,6 +1,8 @@
 package editor
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"time"
@@ -67,6 +69,9 @@ func (e *Editor) save() error {
 	}
 
 	e.dirty = false
+	// Update the hash after a successful save
+	e.initialHash = e.calculateBufferHash()
+
 	e.setStatusMessage("%d bytes written to %s", n, e.filename)
 	return nil
 }
@@ -74,6 +79,13 @@ func (e *Editor) save() error {
 func (e *Editor) setStatusMessage(f string, a ...interface{}) {
 	e.statusMessage = fmt.Sprintf(f, a...)
 	e.statusTime = time.Now()
+}
+
+// handleBufferError handles errors from buffer operations and displays them to the user.
+func (e *Editor) handleBufferError(err error) {
+	if err != nil {
+		e.setStatusMessage("Error: %v", err)
+	}
 }
 
 func (e *Editor) getRuneAt(y, x int) rune {
@@ -85,4 +97,24 @@ func (e *Editor) getRuneAt(y, x int) rune {
 		return 0
 	}
 	return []rune(line)[x]
+}
+
+// calculateBufferHash computes the SHA-256 hash of the current buffer content.
+// This allows for exact content comparison to check if the file was actually modified.
+func (e *Editor) calculateBufferHash() string {
+	hasher := sha256.New()
+	// Rope.WriteTo works with any io.Writer, so we pipe it directly to the hasher.
+	// This is memory efficient as it doesn't create a full string copy.
+	if _, err := e.buffer.WriteTo(hasher); err != nil {
+		// In the unlikely event of a hashing error, return a value that won't match.
+		return "error_calculating_hash"
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+// isContentUnchanged checks if the current buffer content exactly matches
+// the content when the file was loaded or last saved.
+func (e *Editor) isContentUnchanged() bool {
+	currentHash := e.calculateBufferHash()
+	return currentHash == e.initialHash
 }

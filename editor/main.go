@@ -2,7 +2,10 @@ package editor
 
 import (
 	"bufio"
+	"fmt"
+	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bulga138/panka/buffer"
@@ -20,6 +23,7 @@ const (
 	ansiClearLine      = "\x1b[K"
 	ansiReset          = "\x1b[m"
 	ansiInvert         = "\x1b[7m"
+	ansiDim            = "\x1b[2m" // Added Dim for non-printables
 	ansiEnterAltScreen = "\x1b[?1049h"
 	ansiExitAltScreen  = "\x1b[?1049l"
 )
@@ -30,19 +34,27 @@ type findResult struct {
 }
 
 type Editor struct {
-	term               terminal.Terminal
-	buffer             buffer.Buffer
-	config             config.Config
-	filename           string
-	termWidth          int
-	termHeight         int
-	cursorX            int
-	cursorY            int
+	term       terminal.Terminal
+	buffer     buffer.Buffer
+	config     config.Config
+	filename   string
+	termWidth  int
+	termHeight int
+	cursorX    int
+	cursorY    int
+
+	// Multi-cursor state
+	// 0 = single cursor.
+	// > 0 = extends downwards (e.g., 2 means current line + 2 lines below).
+	// < 0 = extends upwards (e.g., -2 means current line + 2 lines above).
+	extraCursorHeight int
+
 	viewportWrapOffset int
 	viewportY          int
 	viewportCol        int
 	lineNumWidth       int
 	dirty              bool
+	initialHash        string
 	statusMessage      string
 	statusTime         time.Time
 	quit               bool
@@ -72,8 +84,9 @@ type Editor struct {
 	backspaceThreshold time.Duration
 
 	// Line related
-	showLineNumbers bool
-	isGotoLine      bool
+	showLineNumbers  bool
+	showNonPrintable bool
+	isGotoLine       bool
 
 	// Prompt
 	promptBuffer        string
@@ -129,6 +142,7 @@ func NewEditor(term terminal.Terminal, cfg config.Config, file string) (*Editor,
 		inputReader:         bufio.NewReader(term.Stdin()),
 		lineNumWidth:        5,
 		showLineNumbers:     cfg.ShowLineNumbers,
+		showNonPrintable:    cfg.ShowNonPrintable,
 		undoStack:           make([]undoAction, 0),
 		redoStack:           make([]undoAction, 0),
 		isQuitting:          false,
@@ -145,16 +159,20 @@ func NewEditor(term terminal.Terminal, cfg config.Config, file string) (*Editor,
 		replaceCursorX:      0,
 		promptFocus:         0,
 		isConfirmingReplace: false,
+		initialHash:         "",
+		extraCursorHeight:   0,
 	}
 	var content string
 	if file != "" {
-		b, err := os.ReadFile(file)
+		var err error
+		content, err = e.loadFileContent(file)
 		if err != nil && !os.IsNotExist(err) {
-			return nil, err
+			return nil, fmt.Errorf("failed to load file %s: %w", file, err)
 		}
-		content = string(b)
 	}
 	e.buffer = buffer.NewRope(content)
+	e.initialHash = e.calculateBufferHash()
+
 	e.refreshSize()
 	e.updateLineNumWidth()
 	e.lastTermWidth = e.termWidth
@@ -274,6 +292,48 @@ func (e *Editor) countVisualRows(fileLine int, textWidth int) int {
 		return 1
 	}
 	return numVisualRows
+}
+
+func (e *Editor) loadFileContent(filename string) (string, error) {
+	const streamingThreshold = 1024 * 1024
+
+	info, err := os.Stat(filename)
+	if err != nil {
+		return "", err
+	}
+
+	if info.Size() < streamingThreshold {
+		b, err := os.ReadFile(filename)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+
+	file, err := os.Open(filename)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	var result strings.Builder
+	result.Grow(int(info.Size()))
+
+	buf := make([]byte, 64*1024)
+	for {
+		n, err := file.Read(buf)
+		if n > 0 {
+			result.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("error reading file: %w", err)
+		}
+	}
+
+	return result.String(), nil
 }
 
 func (e *Editor) getVisualCursorPos() (int, int) {

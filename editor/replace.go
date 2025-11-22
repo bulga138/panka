@@ -14,11 +14,17 @@ func (e *Editor) insertString(s string) {
 		insertLine := e.cursorY
 		insertCol := e.cursorX
 		if r == '\n' {
-			e.buffer.Insert(e.cursorY, e.cursorX, '\n')
+			if err := e.buffer.Insert(e.cursorY, e.cursorX, '\n'); err != nil {
+				e.setStatusMessage("Replace error: %v", err)
+				return
+			}
 			e.cursorY++
 			e.cursorX = 0
 		} else {
-			e.buffer.Insert(e.cursorY, e.cursorX, r)
+			if err := e.buffer.Insert(e.cursorY, e.cursorX, r); err != nil {
+				e.setStatusMessage("Replace error: %v", err)
+				return
+			}
 			e.cursorX++
 		}
 		delLine := e.cursorY

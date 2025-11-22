@@ -23,20 +23,27 @@ func (e *Editor) pasteFromClipboard() error {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	e.flushTypingAndBackspaceIfNeeded()
+	
+	// Always group paste operations as a single undo action
+	e.beginUndoGroup()
+	defer e.endUndoGroup()
+	
 	entries := make([]opEntry, 0, len([]rune(text)))
-	wasGrouping := e.undoGrouping
-	if !wasGrouping {
-		e.beginUndoGroup()
-	}
 	for _, r := range []rune(text) {
 		insertLine := e.cursorY
 		insertCol := e.cursorX
 		if r == '\n' {
-			e.buffer.Insert(e.cursorY, e.cursorX, '\n')
+			if err := e.buffer.Insert(e.cursorY, e.cursorX, '\n'); err != nil {
+				e.setStatusMessage("Paste error: %v", err)
+				return err
+			}
 			e.cursorY++
 			e.cursorX = 0
 		} else {
-			e.buffer.Insert(e.cursorY, e.cursorX, r)
+			if err := e.buffer.Insert(e.cursorY, e.cursorX, r); err != nil {
+				e.setStatusMessage("Paste error: %v", err)
+				return err
+			}
 			e.cursorX++
 		}
 		delLine := e.cursorY
@@ -47,10 +54,8 @@ func (e *Editor) pasteFromClipboard() error {
 			r: r,
 		})
 	}
+	// Push all entries as a single grouped undo action
 	e.pushUndoInsertBlock(entries)
-	if !wasGrouping {
-		e.endUndoGroup()
-	}
 	e.dirty = true
 	e.setStatusMessage("Pasted from clipboard")
 	return nil
@@ -189,7 +194,9 @@ func setClipboardTextWindows(text string) error {
 func (e *Editor) copyToClipboard() error {
 	content := e.getSelectedText()
 	if content == "" {
-		content = e.buffer.GetLine(e.cursorY)
+		// When copying a single line, include the newline character
+		// so that pasting it will create a new line
+		content = e.buffer.GetLine(e.cursorY) + "\n"
 	}
 	content = strings.ReplaceAll(content, "\n", "\r\n")
 	err := e.setClipboardText(content)
@@ -205,7 +212,9 @@ func (e *Editor) cutToClipboard() error {
 	e.flushTypingAndBackspaceIfNeeded()
 	content := e.getSelectedText()
 	if content == "" {
-		content = e.buffer.GetLine(e.cursorY)
+		// When cutting a single line, include the newline character
+		// so that pasting it will create a new line
+		content = e.buffer.GetLine(e.cursorY) + "\n"
 		e.beginUndoGroup()
 		e.deleteCurrentLine()
 		e.endUndoGroup()

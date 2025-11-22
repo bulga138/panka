@@ -24,7 +24,10 @@ func (e *Editor) deleteSelectedText() {
 			})
 		}
 		for i := actualEndX - 1; i >= startX; i-- {
-			e.buffer.Delete(startY, i+1)
+			if err := e.buffer.Delete(startY, i+1); err != nil {
+				e.setStatusMessage("Delete error: %v", err)
+				return
+			}
 		}
 	} else {
 		firstLine := e.buffer.GetLine(startY)
@@ -52,18 +55,39 @@ func (e *Editor) deleteSelectedText() {
 			entries = append(entries, opEntry{insertLine: actualInsertLine, insertCol: i, r: lastRunes[i]})
 		}
 		for i := actualEndX - 1; i >= 0; i-- {
-			e.buffer.Delete(endY, i+1)
-		}
-		for y := endY - 1; y > startY; y-- {
-			e.buffer.Delete(y+1, 0)
-			lineRunes := []rune(e.buffer.GetLine(y))
-			for i := len(lineRunes) - 1; i >= 0; i-- {
-				e.buffer.Delete(y, i+1)
+			if err := e.buffer.Delete(endY, i+1); err != nil {
+				e.setStatusMessage("Delete error: %v", err)
+				return
 			}
 		}
-		e.buffer.Delete(startY+1, 0)
+		for y := endY - 1; y > startY; y-- {
+			// --- FIX: Delete content FIRST, then delete the newline ---
+			// Previously, deleting the newline first merged the next line (which we want to keep)
+			// into the current line, and then we deleted the content, effectively erasing the next line.
+
+			lineRunes := []rune(e.buffer.GetLine(y))
+			for i := len(lineRunes) - 1; i >= 0; i-- {
+				if err := e.buffer.Delete(y, i+1); err != nil {
+					e.setStatusMessage("Delete error: %v", err)
+					return
+				}
+			}
+			// Now delete the newline connecting this (now empty) line to the next
+			if err := e.buffer.Delete(y+1, 0); err != nil {
+				e.setStatusMessage("Delete error: %v", err)
+				return
+			}
+			// --- END FIX ---
+		}
+		if err := e.buffer.Delete(startY+1, 0); err != nil {
+			e.setStatusMessage("Delete error: %v", err)
+			return
+		}
 		for i := len(firstRunes) - 1; i >= startX; i-- {
-			e.buffer.Delete(startY, i+1)
+			if err := e.buffer.Delete(startY, i+1); err != nil {
+				e.setStatusMessage("Delete error: %v", err)
+				return
+			}
 		}
 	}
 
@@ -136,10 +160,16 @@ func (e *Editor) deleteCurrentLine() {
 		entries = append(entries, opEntry{insertLine: lineIdx, insertCol: len(lineRunes), r: '\n'})
 	}
 	for i := len(lineRunes) - 1; i >= 0; i-- {
-		e.buffer.Delete(lineIdx, i+1)
+		if err := e.buffer.Delete(lineIdx, i+1); err != nil {
+			e.setStatusMessage("Delete error: %v", err)
+			return
+		}
 	}
 	if e.cursorY < e.buffer.LineCount()-1 {
-		e.buffer.Delete(e.cursorY+1, 0)
+		if err := e.buffer.Delete(e.cursorY+1, 0); err != nil {
+			e.setStatusMessage("Delete error: %v", err)
+			return
+		}
 	}
 	e.pushUndoDeleteBlock(entries, false)
 	e.cursorX = 0

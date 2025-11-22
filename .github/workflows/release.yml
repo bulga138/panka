@@ -1,0 +1,115 @@
+name: Build and Release
+
+on:
+  # Trigger 1: Manual run
+  workflow_dispatch:
+    inputs:
+      version_strategy:
+        description: 'Version Strategy'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - specific-tag  # Use "custom_tag" input
+      custom_tag:
+        description: 'Specific Tag (e.g., v1.2.3) if strategy is "specific-tag"'
+        required: false
+
+  # Trigger 2: PR Merged to main/master
+  pull_request:
+    types: [closed]
+    branches: [master, main]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    # Only run if it was a manual dispatch OR (PR merged AND has 'RELEASE' label)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'RELEASE'))
+    
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Important: Fetch all history for git describe to work
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.24'
+
+      - name: Determine Version
+        id: version
+        shell: bash
+        run: |
+          # 1. Get latest tag (default to v0.0.0 if none)
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $LATEST_TAG"
+          
+          # Remove 'v' prefix
+          VERSION_NO_V=${LATEST_TAG#v}
+          IFS='.' read -r -a parts <<< "$VERSION_NO_V"
+          MAJOR=${parts[0]}
+          MINOR=${parts[1]}
+          PATCH=${parts[2]}
+          
+          # 2. Determine Strategy
+          STRATEGY="patch" # Default
+          
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            STRATEGY="${{ inputs.version_strategy }}"
+          else
+            # PR Logic: Check labels
+            LABELS="${{ join(github.event.pull_request.labels.*.name, ',') }}"
+            if [[ "$LABELS" == *"major"* ]]; then STRATEGY="major";
+            elif [[ "$LABELS" == *"minor"* ]]; then STRATEGY="minor";
+            fi
+          fi
+          
+          # 3. Calculate New Version
+          if [ "$STRATEGY" == "major" ]; then
+            NEW_TAG="v$((MAJOR + 1)).0.0"
+          elif [ "$STRATEGY" == "minor" ]; then
+            NEW_TAG="v$MAJOR.$((MINOR + 1)).0"
+          elif [ "$STRATEGY" == "specific-tag" ]; then
+            NEW_TAG="${{ inputs.custom_tag }}"
+          else
+            NEW_TAG="v$MAJOR.$MINOR.$((PATCH + 1))"
+          fi
+          
+          echo "New version: $NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+
+      - name: Create and Push Tag
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -a ${{ steps.version.outputs.new_tag }} -m "Release ${{ steps.version.outputs.new_tag }}"
+          git push origin ${{ steps.version.outputs.new_tag }}
+
+      - name: Build Binary (Cross-Compile for Windows)
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          # We override variables to force Windows build on Linux runner
+          # We explicitly set EXE_EXT=.exe because the Makefile detects Linux OS
+          make build EXE_EXT=.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.new_tag }}
+          name: Release ${{ steps.version.outputs.new_tag }}
+          files: panka.exe
+          draft: false
+          prerelease: false

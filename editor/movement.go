@@ -22,6 +22,7 @@ func (e *Editor) movePageUp() {
 	if e.cursorY < 0 {
 		e.cursorY = 0
 	}
+	e.extraCursorHeight = 0
 	e.clampCursorX()
 }
 
@@ -31,6 +32,7 @@ func (e *Editor) movePageDown() {
 	if e.cursorY >= lineCount {
 		e.cursorY = max(lineCount-1, 0)
 	}
+	e.extraCursorHeight = 0
 	e.clampCursorX()
 }
 
@@ -61,11 +63,13 @@ func (e *Editor) moveLineEnd(isSelecting bool) {
 }
 
 func (e *Editor) moveDocStart() {
+	e.extraCursorHeight = 0
 	e.cursorY = 0
 	e.cursorX = 0
 }
 
 func (e *Editor) moveDocEnd() {
+	e.extraCursorHeight = 0
 	e.cursorY = e.buffer.LineCount() - 1
 	if e.cursorY < 0 {
 		e.cursorY = 0
@@ -88,6 +92,7 @@ func (e *Editor) toggleLineNumbers() {
 func (e *Editor) handleEscape() error {
 	var b byte
 	var err error
+
 	if f, ok := e.term.Stdin().(*os.File); ok {
 		f.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 		b, err = e.inputReader.ReadByte()
@@ -95,6 +100,7 @@ func (e *Editor) handleEscape() error {
 	} else {
 		return nil
 	}
+
 	if err != nil {
 		goto CANCEL_MODE
 	}
@@ -164,6 +170,10 @@ func (e *Editor) handleEscape() error {
 			}
 
 			switch cmd {
+			case 'Z': // Shift+Tab
+				if e.isReplacing {
+					e.promptFocus = (e.promptFocus + 1) % 2
+				}
 			case 'D': // Left
 				e.movePromptCursor(-1)
 			case 'C': // Right
@@ -190,10 +200,16 @@ func (e *Editor) handleEscape() error {
 
 		// --- MAIN EDITOR NAVIGATION ---
 		switch cmd {
+		case 'Z': // Shift+Tab (Back Tab)
+			e.flushEditGroups()
+			e.unindentLine()
+			return nil
+
 		case 'A', 'B', 'C', 'D': // Arrow keys
 			isShift := false
 			isCtrl := false
 			isCtrlShift := false
+			isAlt := false
 
 			if strings.Contains(params, ";2") {
 				isShift = true
@@ -205,6 +221,46 @@ func (e *Editor) handleEscape() error {
 				isCtrl = true
 				isShift = true
 				isCtrlShift = true
+			}
+			// --- Detect Ctrl+Alt (1;7) or Ctrl+Alt+Shift (1;8) ---
+			if strings.Contains(params, ";7") {
+				isCtrl = true
+				isAlt = true
+			}
+			if strings.Contains(params, ";8") {
+				isCtrl = true
+				isAlt = true
+				isShift = true
+			}
+
+			// --- Handle Ctrl+Alt+Up/Down/Left/Right ---
+			if isCtrl && isAlt {
+				switch cmd {
+				case 'A': // Up -> Move line up
+					e.moveLineUp()
+					return nil
+				case 'B': // Down -> Move line down
+					e.moveLineDown()
+					return nil
+				case 'C': // Right -> Increase height downwards (or shrink upwards)
+					if e.extraCursorHeight < 0 {
+						e.extraCursorHeight++ // Shrink upwards extension
+					} else {
+						if e.cursorY+e.extraCursorHeight+1 < e.buffer.LineCount() {
+							e.extraCursorHeight++ // Grow downwards extension
+						}
+					}
+					return nil
+				case 'D': // Left -> Increase height upwards (or shrink downwards)
+					if e.extraCursorHeight > 0 {
+						e.extraCursorHeight-- // Shrink downwards extension
+					} else {
+						if e.cursorY+e.extraCursorHeight-1 >= 0 {
+							e.extraCursorHeight-- // Grow upwards extension
+						}
+					}
+					return nil
+				}
 			}
 
 			if isCtrl {
@@ -262,11 +318,13 @@ func (e *Editor) handleEscape() error {
 	}
 
 CANCEL_MODE:
+	// 1. Handle Confirm Prompt
 	if e.isConfirmingReplace {
 		e.isConfirmingReplace = false
 		e.setStatusMessage("Replace All cancelled.")
 		return nil
 	}
+	// 2. Handle Replace Mode
 	if e.isReplacing {
 		e.isReplacing = false
 		e.isFinding = false
@@ -275,18 +333,21 @@ CANCEL_MODE:
 		e.setStatusMessage("Replace cancelled.")
 		return nil
 	}
+	// 3. Handle Save As
 	if e.isSaveAs {
 		e.isSaveAs = false
 		e.promptBuffer = ""
 		e.setStatusMessage("Save As cancelled.")
 		return nil
 	}
+	// 4. Handle Goto
 	if e.isGotoLine {
 		e.isGotoLine = false
 		e.promptBuffer = ""
 		e.setStatusMessage("Go to line cancelled.")
 		return nil
 	}
+	// 5. Handle Find
 	if e.isFinding {
 		e.isFinding = false
 		e.promptBuffer = ""
@@ -298,10 +359,20 @@ CANCEL_MODE:
 		e.setStatusMessage("Find cancelled.")
 		return nil
 	}
+
+	// 6. Handle Multi-Cursor Cancellation
+	if e.extraCursorHeight != 0 {
+		e.extraCursorHeight = 0
+		// e.setStatusMessage("Multi-cursor cancelled.") // Optional feedback
+		return nil
+	}
+
 	return nil
 }
 
 func (e *Editor) handleArrowKey(direction byte, modified bool) {
+	// NOTE: We deliberately do NOT reset e.extraCursorHeight here anymore,
+	// allowing the arrow keys to move the block of cursors.
 	switch direction {
 	case 'A': // Up
 		e.moveCursor(0, -1, modified)
@@ -321,6 +392,45 @@ func (e *Editor) moveCursor(dx, dy int, isSelecting bool) {
 		e.selectionActive = true
 		e.selectionAnchorX = e.cursorX
 		e.selectionAnchorY = e.cursorY
+	}
+
+	if e.extraCursorHeight != 0 {
+		if dy != 0 {
+			startLine, endLine := e.getMultiCursorRange()
+			if startLine+dy < 0 {
+				return
+			}
+			if endLine+dy >= e.buffer.LineCount() {
+				return
+			}
+
+			e.cursorY += dy
+			// NOTE: This might pull secondary cursors back if main line is short.
+			// This is acceptable for basic column mode.
+			e.clampCursorX()
+			return
+		}
+
+		if dx != 0 {
+			// Move horizontally WITHOUT wrapping
+			// Wrapping breaks the column alignment
+			newX := e.cursorX + dx
+			if newX < 0 {
+				newX = 0
+			}
+
+			// Clamp to the MAIN line length.
+			// If secondary lines are longer, we can technically move past EOL of main line
+			// only if we support virtual space (which we don't fully).
+			// So we clamp to the main line.
+			lineLen := len([]rune(e.buffer.GetLine(e.cursorY)))
+			if newX > lineLen {
+				newX = lineLen
+			}
+
+			e.cursorX = newX
+			return
+		}
 	}
 	if dy != 0 {
 		e.cursorY += dy

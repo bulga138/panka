@@ -65,7 +65,6 @@ func (e *Editor) render() {
 				if e.isConfirmingReplace {
 					separator := " | "
 					prompt := fmt.Sprintf("Confirm Replace All (%d)? (Y/N)", len(e.findMatches))
-
 					prefixLen := runewidth.StringWidth("Replace: ") + runewidth.StringWidth(e.replaceBuffer) + runewidth.StringWidth(separator)
 					visualCursorOffset = runewidth.StringWidth(prompt)
 					cursorCol = prefixLen + visualCursorOffset + 1
@@ -95,7 +94,6 @@ func (e *Editor) render() {
 			}
 			cursorRow = e.termHeight + 3
 		}
-
 		ab.WriteString(fmt.Sprintf("\x1b[%d;%dH", cursorRow, cursorCol))
 		ab.WriteString(ansiShowCursor)
 	} else {
@@ -112,6 +110,7 @@ func (e *Editor) render() {
 		if visCol > e.termWidth {
 			visCol = e.termWidth
 		}
+
 		ab.WriteString(fmt.Sprintf("\x1b[%d;%dH", visRow, visCol))
 		ab.WriteString(ansiShowCursor)
 	}
@@ -125,6 +124,9 @@ func (e *Editor) drawRows(ab *bytes.Buffer) {
 	fileLine := e.viewportY
 	lineWrapOffset := e.viewportWrapOffset
 	selStartL, selStartC, selEndL, selEndC := e.getSelectionCoordsSafe()
+
+	mcStart, mcEnd := e.getMultiCursorRange()
+
 	for screenRow := 0; screenRow < e.termHeight; screenRow++ {
 		if fileLine >= e.buffer.LineCount() {
 			ab.WriteString(e.drawTildeRow())
@@ -151,6 +153,7 @@ func (e *Editor) drawRows(ab *bytes.Buffer) {
 				lineVisWidth += rWidth
 				visCharPositions = append(visCharPositions, lineVisWidth)
 			}
+
 			totalVisualRows := 1
 			if lineVisWidth > 0 {
 				totalVisualRows = (lineVisWidth + textWidth - 1) / textWidth
@@ -158,6 +161,7 @@ func (e *Editor) drawRows(ab *bytes.Buffer) {
 					totalVisualRows = 1
 				}
 			}
+
 			if lineWrapOffset < totalVisualRows {
 				var lineBuffer bytes.Buffer
 				rowStartVisPos := lineWrapOffset * textWidth
@@ -176,6 +180,12 @@ func (e *Editor) drawRows(ab *bytes.Buffer) {
 						break
 					}
 				}
+
+				hasMultiCursor := false
+				if fileLine != e.cursorY && fileLine >= mcStart && fileLine <= mcEnd {
+					hasMultiCursor = true
+				}
+
 				renderedWidth := 0
 				for i := startChar; i < endChar && renderedWidth < textWidth; i++ {
 					if i >= len(runes) {
@@ -183,49 +193,97 @@ func (e *Editor) drawRows(ab *bytes.Buffer) {
 					}
 					r := runes[i]
 					charStartVisPos := visCharPositions[i]
-					charEndVisPos := visCharPositions[i+1]
 					visibleStart := max(charStartVisPos, rowStartVisPos)
-					visibleEnd := min(charEndVisPos, rowEndVisPos)
-					visibleWidth := visibleEnd - visibleStart
-					if visibleWidth > 0 {
-						isSelected := e.isRuneSelected(fileLine, i, selStartL, selStartC, selEndL, selEndC)
-						if isSelected {
-							lineBuffer.WriteString(ansiInvert)
-						}
-						if r == '\t' {
-							spacesToRender := min(visibleWidth, textWidth-renderedWidth)
+
+					isUnderCursor := hasMultiCursor && i == e.cursorX
+					isSelected := e.isRuneSelected(fileLine, i, selStartL, selStartC, selEndL, selEndC)
+
+					if isUnderCursor {
+						lineBuffer.WriteString(ansiInvert)
+					} else if isSelected {
+						lineBuffer.WriteString(ansiInvert)
+					}
+
+					if r == '\t' {
+						spacesToRender := min(visibleWidth(charStartVisPos, visCharPositions[i+1], rowStartVisPos, rowEndVisPos), textWidth-renderedWidth)
+
+						if e.showNonPrintable && spacesToRender > 0 {
+							// Draw arrow for first char of tab
+							if visibleStart == charStartVisPos {
+								lineBuffer.WriteString(ansiDim)
+								lineBuffer.WriteRune('→') // U+2192
+								lineBuffer.WriteString(ansiReset)
+								if isUnderCursor || isSelected {
+									lineBuffer.WriteString(ansiInvert)
+								}
+
+								for j := 1; j < spacesToRender; j++ {
+									lineBuffer.WriteRune(' ')
+								}
+							} else {
+								for j := 0; j < spacesToRender; j++ {
+									lineBuffer.WriteRune(' ')
+								}
+							}
+						} else {
 							for j := 0; j < spacesToRender; j++ {
 								lineBuffer.WriteRune(' ')
 							}
-							renderedWidth += spacesToRender
-						} else {
-							if visibleStart == charStartVisPos {
-								lineBuffer.WriteRune(r)
-								renderedWidth += 1
-							} else {
-								spacesToAdd := min(visibleWidth, textWidth-renderedWidth)
-								for j := 0; j < spacesToAdd; j++ {
-									lineBuffer.WriteRune(' ')
-								}
-								renderedWidth += spacesToAdd
-							}
 						}
-						if isSelected {
-							lineBuffer.WriteString(ansiReset)
+						renderedWidth += spacesToRender
+					} else if r == ' ' && e.showNonPrintable {
+						lineBuffer.WriteString(ansiDim)
+						lineBuffer.WriteRune('·') // U+00B7 Middle Dot
+						lineBuffer.WriteString(ansiReset)
+						if isUnderCursor || isSelected {
+							lineBuffer.WriteString(ansiInvert) // Re-apply if needed
 						}
+						renderedWidth += 1
+					} else {
+						lineBuffer.WriteRune(r)
+						renderedWidth += 1
+					}
+
+					if isUnderCursor || isSelected {
+						lineBuffer.WriteString(ansiReset)
 					}
 				}
-				ab.Write(lineBuffer.Bytes())
-			} else {
-				if e.showLineNumbers {
+
+				isEOLUnderCursor := hasMultiCursor && e.cursorX >= len(runes)
+				isEOLSelected := e.isRuneSelected(fileLine, len(runes), selStartL, selStartC, selEndL, selEndC)
+
+				if endChar == len(runes) && renderedWidth < textWidth {
+					if isEOLUnderCursor {
+						lineBuffer.WriteString(ansiInvert)
+						if e.showNonPrintable {
+							lineBuffer.WriteString(ansiDim + "¶" + ansiReset + ansiInvert)
+						} else {
+							lineBuffer.WriteRune(' ')
+						}
+						lineBuffer.WriteString(ansiReset)
+					} else if isEOLSelected {
+						lineBuffer.WriteString(ansiInvert)
+						if e.showNonPrintable {
+							lineBuffer.WriteString(ansiDim + "¶" + ansiReset + ansiInvert)
+						} else {
+							lineBuffer.WriteRune(' ')
+						}
+						lineBuffer.WriteString(ansiReset)
+					} else if e.showNonPrintable {
+						// Draw newline char if visible mode is on (and not selected)
+						lineBuffer.WriteString(ansiDim)
+						lineBuffer.WriteRune('¶') // U+00B6 Pilcrow
+						lineBuffer.WriteString(ansiReset)
+					}
 				}
+
+				ab.Write(lineBuffer.Bytes())
 			}
 			ab.WriteString(ansiClearLine)
 			ab.WriteString("\r\n")
 		}
 		if fileLine < e.buffer.LineCount() {
 			numVisualRows := e.countVisualRows(fileLine, textWidth)
-
 			if lineWrapOffset+1 < numVisualRows {
 				lineWrapOffset++
 			} else {
@@ -237,6 +295,31 @@ func (e *Editor) drawRows(ab *bytes.Buffer) {
 			lineWrapOffset = 0
 		}
 	}
+}
+
+// Helper to calculate visible width of a char/tab split across rows
+func visibleWidth(start, end, rowStart, rowEnd int) int {
+	vStart := max(start, rowStart)
+	vEnd := min(end, rowEnd)
+	if vEnd > vStart {
+		return vEnd - vStart
+	}
+	return 0
+}
+
+// Helper functions for min/max
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (e *Editor) getSelectionCoords() (startY, startX, endY, endX int) {
@@ -294,7 +377,7 @@ func (e *Editor) drawCommandBar(ab *bytes.Buffer) {
 		ab.WriteString(strings.Repeat(" ", padding))
 		ab.WriteString(hints) // Draw hints aligned to right
 	} else {
-		cmdStr := " ^S Save | ^Q Quit | ^U Undo | ^Y Redo | ^X Cut | ^C Copy | ^V Paste | ^T Go to | ^F Find | ^H Replace"
+		cmdStr := " ^S Save | ^Q Quit | ^U Undo | ^Y Redo | ^X Cut | ^C Copy | ^V Paste | ^T Go to | ^F Find | ^H Replace | ^K Toggle case | ^O Non-printable"
 		if len(cmdStr) > e.termWidth {
 			cmdStr = cmdStr[:e.termWidth]
 		}
